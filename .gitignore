@@ -1,0 +1,29 @@
+# Secrets — NEVER commit
+.env
+*.env
+!.env.example
+
+# Local config (copied from config.example.toml, holds host-specific values)
+config.toml
+
+# Working clones, if the root is ever pointed inside the checkout
+repos/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Runtime state and logs
+logs/
+*.log
+
+# Editors/OS
+.vscode/
+.idea/
+.DS_Store

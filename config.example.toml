@@ -1,0 +1,52 @@
+# phush config template. Copy to config.toml and adjust.
+# config.toml is NOT committed (it holds host-specific values).
+
+[server]
+# The server binds here only. Keep it on localhost and put a reverse proxy in front
+# to terminate HTTPS. Do not bind to a public address.
+host = "127.0.0.1"
+port = 8766
+
+[git]
+# GitHub account (or organisation) that owns the repositories this server may touch.
+owner = "your-github-name"
+
+# How a repository name becomes a clone URL. The default uses SSH, so the server
+# authenticates with its own key: create one with `ssh-keygen -t ed25519`, then add the
+# public half to the account above (Settings -> SSH and GPG keys). The private half
+# never leaves the server, and no API token is needed.
+remote_template = "git@github.com:{owner}/{repo}.git"
+
+# Where working clones live. Give it a disk with room to spare — one clone per repo.
+root = "/var/lib/phush/repos"
+
+# Branch used when a clone has no checked-out branch to report.
+default_branch = "main"
+
+# Repositories the server may open. An EMPTY list means every repository of the owner
+# is reachable. Fill it in to restrict the server to a few names.
+allow_repos = []
+
+# Identity for the commits this server makes.
+author_name = "phush"
+author_email = "phush@localhost"
+
+[limits]
+# Largest file the server will read or patch, in bytes. Bigger files must be searched
+# with `search` and edited with `patch_file` on a known snippet.
+max_read_bytes = 200000
+
+# Largest single write, in bytes.
+max_write_bytes = 1000000
+
+# Most matches `search` will return in one call.
+max_grep_matches = 100
+
+# Seconds any one git call may take before it is killed.
+git_timeout_seconds = 120
+
+[rate_limit]
+# At most this many tool calls per rolling window. Protects against runaway loops and
+# makes abuse of a leaked token obvious.
+max_requests = 60
+window_seconds = 60
