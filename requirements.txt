@@ -1,3 +1,4 @@
 mcp>=2.0
 python-dotenv>=1.0
 uvicorn>=0.30
+openpyxl>=3.1

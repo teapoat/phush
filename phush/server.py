@@ -16,10 +16,11 @@ from collections import deque
 import uvicorn
 from mcp.server import MCPServer
 
-from . import editor
+from . import editor, sheets
 from .config import Config, load_config
 from .editor import EditError
 from .gitcmd import GitError
+from .sheets import SheetError
 from .workspace import Workspace, WorkspaceError, safe_join
 
 log = logging.getLogger("phush")
@@ -241,6 +242,62 @@ def build_server(config: Config) -> MCPServer:
             target = safe_join(state.path, path)
             return editor.write(target, content, config.max_write_bytes)
         except (WorkspaceError, GitError, EditError) as exc:
+            return f"refused: {exc}"
+
+    @mcp.tool(
+        description=(
+            "List the sheets of a spreadsheet (.xlsx) with their size, and warn about "
+            "charts or images that a save could drop. Look here before writing cells."
+        )
+    )
+    async def xlsx_sheets(repo: str, path: str) -> str:
+        try:
+            state = _open(repo, "xlsx_sheets", path)
+            return sheets.describe(safe_join(state.path, path))
+        except (WorkspaceError, GitError, SheetError) as exc:
+            return f"refused: {exc}"
+
+    @mcp.tool(
+        description=(
+            "Read a cell or a rectangular range from a spreadsheet, for example "
+            "'Q1:S20'. Empty cells are skipped. Leave sheet empty for the first sheet."
+        )
+    )
+    async def xlsx_read(repo: str, path: str, cells: str, sheet: str = "") -> str:
+        try:
+            state = _open(repo, "xlsx_read", f"{path} {cells}")
+            return sheets.read_range(safe_join(state.path, path), sheet, cells)
+        except (WorkspaceError, GitError, SheetError) as exc:
+            return f"refused: {exc}"
+
+    @mcp.tool(
+        description=(
+            "Find cells containing some text, to locate the row you want to edit. "
+            "Returns cell addresses with their values."
+        )
+    )
+    async def xlsx_find(repo: str, path: str, text: str, sheet: str = "") -> str:
+        try:
+            state = _open(repo, "xlsx_find", f"{path} {text}")
+            return sheets.find(safe_join(state.path, path), sheet, text)
+        except (WorkspaceError, GitError, SheetError) as exc:
+            return f"refused: {exc}"
+
+    @mcp.tool(
+        description=(
+            "Write values into named cells of a spreadsheet, for example "
+            "{'Q5': '42', 'R5': 'done'}. Text that looks like a number is stored as a "
+            "number, and a value starting with '=' is stored as a formula. The file is "
+            "not pushed until commit_push."
+        )
+    )
+    async def xlsx_set(
+        repo: str, path: str, values: dict[str, str], sheet: str = ""
+    ) -> str:
+        try:
+            state = _open(repo, "xlsx_set", f"{path} {sorted(values or {})}")
+            return sheets.set_cells(safe_join(state.path, path), sheet, values)
+        except (WorkspaceError, GitError, SheetError) as exc:
             return f"refused: {exc}"
 
     @mcp.tool(

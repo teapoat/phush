@@ -38,7 +38,16 @@ its place on surfaces that have no shell at all.
 | `patch_file` | Replace exact text — the cheap edit |
 | `append_file` | Add text to the end of a file |
 | `write_file` | Replace a whole file (use `patch_file` when you can) |
+| `xlsx_sheets` | Sheets of a spreadsheet, with a warning about what a save could drop |
+| `xlsx_read` | Read a cell or range, for example `Q1:S20` |
+| `xlsx_find` | Find cells containing some text |
+| `xlsx_set` | Write values into named cells |
 | `commit_push` | Stage, commit, rebase onto the remote, push |
+
+The spreadsheet tools exist for the same reason as `patch_file`: a 400 KB workbook is
+not something to move through a model to change three cells. Note that saving a
+workbook rewrites it — values, formulas and ordinary formatting survive, but charts,
+images and pivot tables may not. `xlsx_sheets` says what is at risk before you write.
 
 ## What it will not do
 
