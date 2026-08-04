@@ -246,6 +246,20 @@ def build_server(config: Config) -> MCPServer:
 
     @mcp.tool(
         description=(
+            "Checksum (sha256) of any file in a repository, text or binary. Use it "
+            "when a project records a file's checksum somewhere else and you have just "
+            "changed that file."
+        )
+    )
+    async def file_sha256(repo: str, path: str) -> str:
+        try:
+            state = _open(repo, "file_sha256", path)
+            return editor.sha256(safe_join(state.path, path))
+        except (WorkspaceError, GitError, EditError) as exc:
+            return f"refused: {exc}"
+
+    @mcp.tool(
+        description=(
             "List the sheets of a spreadsheet (.xlsx) with their size, and warn about "
             "charts or images that a save could drop. Look here before writing cells."
         )

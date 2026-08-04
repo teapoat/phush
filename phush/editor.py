@@ -12,6 +12,7 @@ caller expected, nothing is written and the caller is told what was actually fou
 
 from __future__ import annotations
 
+import hashlib
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -47,6 +48,22 @@ def read_lines(path: Path, max_bytes: int, offset: int = 1, limit: int = 400) ->
     body = "\n".join(f"{n}\t{lines[n - 1]}" for n in range(start, end + 1))
     tail = "" if end == len(lines) else f"\n… {len(lines) - end} more lines"
     return body + tail
+
+
+def sha256(path: Path) -> str:
+    """Checksum of any file, text or binary.
+
+    Some projects record a file's checksum elsewhere in the repository and check it
+    later. Editing such a file leaves that record stale, and a client with no shell
+    cannot recompute it — hence this tool.
+    """
+    if not path.is_file():
+        raise EditError(f"no such file: {path.name}")
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return f"{digest.hexdigest()}  {path.name} ({path.stat().st_size} bytes)"
 
 
 @dataclass(frozen=True)

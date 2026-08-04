@@ -102,6 +102,23 @@ class EditorCases(unittest.TestCase):
         self.assertIn("overwrote", editor.write(self.file, "new", 10_000))
         self.assertIn("created", editor.write(self.root / "other.md", "new", 10_000))
 
+    # ---- checksums ----
+
+    def test_sha256_matches_hashlib(self):
+        import hashlib
+
+        expected = hashlib.sha256(SAMPLE.encode("utf-8")).hexdigest()
+        self.assertTrue(editor.sha256(self.file).startswith(expected))
+
+    def test_sha256_works_on_binary_files(self):
+        binary = self.root / "image.bin"
+        binary.write_bytes(b"\xff\xfe\x00\x01")
+        self.assertIn("image.bin", editor.sha256(binary))
+
+    def test_sha256_of_a_missing_file_is_refused(self):
+        with self.assertRaises(EditError):
+            editor.sha256(self.root / "nope.md")
+
     # ---- searching ----
 
     def test_grep_finds_matches_with_line_numbers(self):
