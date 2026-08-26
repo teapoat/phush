@@ -27,3 +27,6 @@ logs/
 .vscode/
 .idea/
 .DS_Store
+
+# Local permissions for this machine. Not shared.
+.claude/settings.local.json
