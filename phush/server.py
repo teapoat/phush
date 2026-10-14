@@ -178,18 +178,49 @@ def build_server(config: Config) -> MCPServer:
         try:
             state = _open(repo, "search", pattern)
             files = workspace.tracked_files(repo, subdir)
-            matches = editor.grep(
+            result = editor.grep(
                 state.path,
                 files,
                 pattern,
                 config.max_grep_matches,
                 config.max_read_bytes,
+                config.search_exclude,
             )
         except (WorkspaceError, GitError, EditError) as exc:
             return f"refused: {exc}"
-        if not matches:
+        if result.matches:
+            lines = [f"{m.path}:{m.line_number}: {m.line}" for m in result.matches]
+            if result.hit_match_limit:
+                lines.append(
+                    f"(stopped at the {config.max_grep_matches}-match limit — there "
+                    f"may be more; narrow the pattern or pass a subdir)"
+                )
+            return "\n".join(lines)
+
+        # Only an empty answer needs the caveat. "No matches" is indistinguishable
+        # from "never looked", and a caller can build a wrong conclusion on that;
+        # once there are matches, what was skipped is noise the caller did not ask for.
+        caveats = []
+        if result.skipped_too_big:
+            shown = ", ".join(result.skipped_too_big[:3])
+            rest = len(result.skipped_too_big) - 3
+            more = f" and {rest} more" if rest > 0 else ""
+            caveats.append(
+                f"{len(result.skipped_too_big)} file(s) over the "
+                f"{config.max_read_bytes}-byte limit were not searched: {shown}{more}"
+            )
+        if result.excluded:
+            caveats.append(
+                f"{result.excluded} path(s) are excluded from search by this "
+                f"server's config"
+            )
+        if not caveats:
             return "no matches"
-        return "\n".join(f"{m.path}:{m.line_number}: {m.line}" for m in matches)
+        return (
+            "no matches — but "
+            + "; ".join(caveats)
+            + ". Check those before concluding the text is absent."
+        )
 
     @mcp.tool(
         description=(
@@ -210,7 +241,7 @@ def build_server(config: Config) -> MCPServer:
             state = _open(repo, "patch_file", path)
             target = safe_join(state.path, path)
             return editor.patch(
-                target, old_text, new_text, replace_count, config.max_read_bytes
+                target, old_text, new_text, replace_count, config.max_patch_bytes
             )
         except (WorkspaceError, GitError, EditError) as exc:
             return f"refused: {exc}"

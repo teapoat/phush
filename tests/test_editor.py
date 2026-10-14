@@ -122,21 +122,59 @@ class EditorCases(unittest.TestCase):
     # ---- searching ----
 
     def test_grep_finds_matches_with_line_numbers(self):
-        matches = editor.grep(self.root, ["notes.md"], r"^beta$", 100, 10_000)
-        self.assertEqual([2, 4], [m.line_number for m in matches])
+        result = editor.grep(self.root, ["notes.md"], r"^beta$", 100, 10_000)
+        self.assertEqual([2, 4], [m.line_number for m in result.matches])
+        self.assertEqual([], result.skipped_too_big)
+        self.assertFalse(result.hit_match_limit)
 
-    def test_grep_stops_at_the_match_limit(self):
-        matches = editor.grep(self.root, ["notes.md"], "a", 2, 10_000)
-        self.assertEqual(2, len(matches))
+    def test_grep_stops_at_the_match_limit_and_says_so(self):
+        result = editor.grep(self.root, ["notes.md"], "a", 2, 10_000)
+        self.assertEqual(2, len(result.matches))
+        self.assertTrue(result.hit_match_limit)
 
-    def test_grep_skips_binary_and_oversized_files(self):
+    def test_grep_skips_binary_files_quietly(self):
         (self.root / "image.bin").write_bytes(b"\xff\xfe beta")
-        matches = editor.grep(self.root, ["image.bin", "notes.md"], "beta", 100, 10_000)
-        self.assertTrue(all(m.path == "notes.md" for m in matches))
+        result = editor.grep(
+            self.root, ["image.bin", "notes.md"], "beta", 100, 10_000
+        )
+        self.assertTrue(all(m.path == "notes.md" for m in result.matches))
+        self.assertEqual([], result.skipped_too_big)
+
+    def test_grep_does_not_name_an_oversized_binary_file(self):
+        (self.root / "big.bin").write_bytes(b"\x00\xff" * 500)
+        result = editor.grep(self.root, ["big.bin", "notes.md"], "beta", 100, 100)
+        self.assertEqual([], result.skipped_too_big)
+
+    def test_grep_names_the_file_it_skipped_for_size(self):
+        big = self.root / "huge.md"
+        big.write_text("beta\n" * 500, encoding="utf-8")
+        result = editor.grep(self.root, ["huge.md", "notes.md"], "beta", 100, 100)
+        self.assertEqual(["huge.md"], result.skipped_too_big)
+        self.assertTrue(all(m.path == "notes.md" for m in result.matches))
+
+    def test_grep_skips_excluded_paths_and_counts_them(self):
+        archive = self.root / "dumps" / "raw"
+        archive.mkdir(parents=True)
+        (archive / "page1.html").write_text("beta here", encoding="utf-8")
+        result = editor.grep(
+            self.root,
+            ["dumps/raw/page1.html", "notes.md"],
+            "beta",
+            100,
+            10_000,
+            exclude=["*/raw/*"],
+        )
+        self.assertTrue(all(m.path == "notes.md" for m in result.matches))
+        self.assertEqual(1, result.excluded)
 
     def test_grep_rejects_a_bad_pattern(self):
         with self.assertRaises(EditError):
             editor.grep(self.root, ["notes.md"], "([unclosed", 100, 10_000)
+
+    def test_patch_says_which_limit_refused_an_oversized_file(self):
+        with self.assertRaises(EditError) as caught:
+            editor.patch(self.file, "gamma", "GAMMA", 1, 2)
+        self.assertIn("patch limit", str(caught.exception))
 
 
 if __name__ == "__main__":

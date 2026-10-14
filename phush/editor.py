@@ -12,8 +12,10 @@ caller expected, nothing is written and the caller is told what was actually fou
 
 from __future__ import annotations
 
+import fnmatch
 import hashlib
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -22,14 +24,14 @@ class EditError(RuntimeError):
     """The edit was refused. Nothing was written."""
 
 
-def read_text(path: Path, max_bytes: int) -> str:
+def read_text(path: Path, max_bytes: int, limit_name: str = "read") -> str:
     if not path.is_file():
         raise EditError(f"no such file: {path.name}")
     size = path.stat().st_size
     if size > max_bytes:
         raise EditError(
-            f"file is {size} bytes, over this server's {max_bytes}-byte read limit — "
-            f"use grep or read a line range instead"
+            f"file is {size} bytes, over this server's {max_bytes}-byte {limit_name} "
+            f"limit — use search, or read a line range instead"
         )
     try:
         return path.read_text(encoding="utf-8")
@@ -66,11 +68,31 @@ def sha256(path: Path) -> str:
     return f"{digest.hexdigest()}  {path.name} ({path.stat().st_size} bytes)"
 
 
+def _looks_like_text(path: Path) -> bool:
+    """Guess from the first few KB, the way `grep` and `file` do: no NUL bytes."""
+    try:
+        with path.open("rb") as handle:
+            head = handle.read(4096)
+    except OSError:
+        return False
+    return b"\x00" not in head
+
+
 @dataclass(frozen=True)
 class Match:
     path: str
     line_number: int
     line: str
+
+
+@dataclass(frozen=True)
+class GrepResult:
+    """What a search found, and what it did not look at."""
+
+    matches: list[Match]
+    skipped_too_big: list[str]
+    hit_match_limit: bool
+    excluded: int = 0
 
 
 def grep(
@@ -79,17 +101,40 @@ def grep(
     pattern: str,
     max_matches: int,
     max_bytes: int,
-) -> list[Match]:
-    """Search tracked files for a regular expression. Binary files are skipped."""
+    exclude: Sequence[str] = (),
+) -> GrepResult:
+    """Search tracked files for a regular expression. Binary files are skipped.
+
+    A file over the read limit is skipped too, but its name is reported: a caller
+    told only "no matches" cannot tell a word that is absent from a file that was
+    never searched, and would draw the wrong conclusion from the silence.
+
+    `exclude` holds glob patterns the owner has declared not worth searching —
+    saved raw dumps, exports, anything kept as an archive rather than read. A search
+    opens every tracked file, so this is what keeps an archive from costing a
+    repository's every query; unlike the size cap, it is a deliberate choice, so
+    the answer reports only how many paths it covered, not their names.
+    """
     try:
         regex = re.compile(pattern)
     except re.error as exc:
         raise EditError(f"bad search pattern: {exc}") from exc
 
     found: list[Match] = []
+    skipped: list[str] = []
+    excluded = 0
     for name in files:
+        if any(fnmatch.fnmatch(name, pattern_) for pattern_ in exclude):
+            excluded += 1
+            continue
         target = root / name
-        if not target.is_file() or target.stat().st_size > max_bytes:
+        if not target.is_file():
+            continue
+        if target.stat().st_size > max_bytes:
+            # Only a text file is worth reporting: an image or archive could not have
+            # matched anyway, and in a repo that stores raw dumps there are hundreds.
+            if _looks_like_text(target):
+                skipped.append(name)
             continue
         try:
             text = target.read_text(encoding="utf-8")
@@ -99,18 +144,22 @@ def grep(
             if regex.search(line):
                 found.append(Match(name, number, line.rstrip()))
                 if len(found) >= max_matches:
-                    return found
-    return found
+                    return GrepResult(found, skipped, True, excluded)
+    return GrepResult(found, skipped, False, excluded)
 
 
 def patch(path: Path, old: str, new: str, expected: int, max_bytes: int) -> str:
-    """Replace exact text. Refuses when the count does not match `expected`."""
+    """Replace exact text. Refuses when the count does not match `expected`.
+
+    `max_bytes` here is the in-place edit limit, not the read limit: the payload is a
+    snippet, so a file too big to serve as a whole read can still be patched.
+    """
     if not old:
         raise EditError("old_text is empty — use append_file or write_file instead")
     if old == new:
         raise EditError("old_text and new_text are identical — nothing to do")
 
-    text = read_text(path, max_bytes)
+    text = read_text(path, max_bytes, limit_name="patch")
     count = text.count(old)
     if count == 0:
         raise EditError(

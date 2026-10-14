@@ -25,6 +25,8 @@ class Config:
     author_name: str
     author_email: str
     max_read_bytes: int
+    max_patch_bytes: int
+    search_exclude: tuple[str, ...]
     max_write_bytes: int
     max_grep_matches: int
     git_timeout_seconds: float
@@ -63,6 +65,7 @@ def load_config() -> Config:
 
     server = data.get("server", {})
     git = data.get("git", {})
+    search = data.get("search", {})
     limits = data.get("limits", {})
     rate = data.get("rate_limit", {})
 
@@ -91,7 +94,9 @@ def load_config() -> Config:
         allow_repos=frozenset(git.get("allow_repos", [])),
         author_name=str(git.get("author_name", "phush")),
         author_email=str(git.get("author_email", "phush@localhost")),
-        max_read_bytes=int(limits.get("max_read_bytes", 200_000)),
+        max_read_bytes=int(limits.get("max_read_bytes", 5_000_000)),
+        max_patch_bytes=int(limits.get("max_patch_bytes", 5_000_000)),
+        search_exclude=tuple(str(g) for g in search.get("exclude", [])),
         max_write_bytes=int(limits.get("max_write_bytes", 1_000_000)),
         max_grep_matches=int(limits.get("max_grep_matches", 100)),
         git_timeout_seconds=float(limits.get("git_timeout_seconds", 120)),

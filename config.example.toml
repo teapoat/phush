@@ -32,18 +32,33 @@ author_name = "phush"
 author_email = "phush@localhost"
 
 [limits]
-# Largest file the server will read or patch, in bytes. Bigger files must be searched
-# with `search` and edited with `patch_file` on a known snippet.
-max_read_bytes = 200000
+# Largest file `read_file` will open, in bytes. It does not bound what the call
+# returns — a read is cut to its line window — so raising it costs server memory, not
+# client context.
+max_read_bytes = 5000000
 
-# Largest single write, in bytes.
+# Largest file `patch_file` may edit in place, in bytes. Higher than the read limit on
+# purpose: the payload is a snippet, so an accumulating file too big to serve whole is
+# still editable line by line.
+max_patch_bytes = 5000000
+
+# Largest single write, in bytes — the payload `write_file` and `append_file` accept.
 max_write_bytes = 1000000
 
-# Most matches `search` will return in one call.
+# Most matches `search` will return in one call. The output says when it stopped here.
 max_grep_matches = 100
 
 # Seconds any one git call may take before it is killed.
 git_timeout_seconds = 120
+
+[search]
+# Glob patterns `search` will not open. A search reads EVERY tracked file, so a
+# repository that also keeps an archive — saved pages, exports, screenshots — pays
+# for it on every query, and matches from the archive crowd out matches from the
+# files that are actually read and edited. Measured on one such repository: 2.3 s
+# per search with the archive, 0.17 s without it. Paths are matched with fnmatch
+# against the path relative to the repository root.
+exclude = []
 
 [rate_limit]
 # At most this many tool calls per rolling window. Protects against runaway loops and
