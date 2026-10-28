@@ -23,17 +23,24 @@ from pathlib import Path
 ALLOWED_SUBCOMMANDS = frozenset(
     {
         "add",
+        "branch",
+        "check-ref-format",
         "clone",
         "commit",
         "config",
         "diff",
         "fetch",
         "log",
+        "merge",
+        "merge-base",
         "ls-files",
+        "ls-remote",
         "pull",
         "push",
         "rebase",
         "rev-parse",
+        "rev-list",
+        "show",
         "status",
         "symbolic-ref",
     }
@@ -93,6 +100,17 @@ def check_args(args: list[str]) -> None:
     sub = args[0]
     if sub not in ALLOWED_SUBCOMMANDS:
         raise GitError(f"git subcommand not allowed: {sub}")
+    if sub == "branch" and not (
+        len(args) == 3 and args[1].startswith("phush-backup/")
+        and args[2] == "HEAD" and len(args[1].split("/")) == 2
+        and args[1].split("/")[1].isalnum()
+    ):
+        raise GitError("only creation of a recovery branch at HEAD is allowed")
+    if sub == "merge" and not (
+        args[1:-1] in (["--no-edit", "--no-ff"], ["--no-edit"], ["--ff-only"])
+        and args[-1].startswith("refs/remotes/origin/")
+    ):
+        raise GitError("only integration of the current origin tracking ref is allowed")
     for arg in args[1:]:
         if arg in _REBASE_SAFE and sub == "rebase":
             continue
@@ -121,13 +139,13 @@ def run(
     env_args = ["git", "-c", "core.hooksPath=/dev/null"]
     # NOTE: the -c above is ours, not the caller's — it disables repository hooks so a
     # cloned repo cannot run code on the server. check_args bans -c from callers.
-    proc = subprocess.run(  # noqa: S603 - argv list, never a shell string
-        env_args + args,
-        cwd=str(cwd) if cwd else None,
-        capture_output=True,
-        text=True,
-        timeout=timeout,
-    )
+    try:
+        proc = subprocess.run(  # noqa: S603 - argv list, never a shell string
+            env_args + args, cwd=str(cwd) if cwd else None,
+            capture_output=True, text=True, timeout=timeout,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise GitError(f"git {args[0]} timed out; inspect repo_status before retrying") from exc
     result = GitResult(proc.returncode, proc.stdout, proc.stderr)
     if check and not result.ok:
         raise GitError(f"git {args[0]} failed: {result.text}")

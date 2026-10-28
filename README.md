@@ -28,10 +28,13 @@ its place on surfaces that have no shell at all.
 
 | Tool | What it does |
 | --- | --- |
-| `repo_open` | Clone the repository if needed, then bring it up to date |
+| `repo_open` | Clone or safely fast-forward; report blocked synchronization honestly |
 | `repo_list` | List repositories already cloned on the server |
 | `repo_status` | Branch and uncommitted changes |
-| `repo_log` | Recent commits |
+| `repo_log` | Recent commits, or only the local / remote side |
+| `repo_diff` | Worktree, index, HEAD, or either side of cached origin; literal paths and pagination |
+| `repo_show` | Commit metadata and patch by commit id |
+| `repo_sync` | Explicit fetch, check, fast-forward or merge with a recovery branch |
 | `list_files` | Files git tracks, optionally under one directory |
 | `read_file` | Read a file as numbered lines, with offset and limit |
 | `search` | Regular-expression search across tracked files |
@@ -42,12 +45,49 @@ its place on surfaces that have no shell at all.
 | `xlsx_read` | Read a cell or range, for example `Q1:S20` |
 | `xlsx_find` | Find cells containing some text |
 | `xlsx_set` | Write values into named cells |
-| `commit_push` | Stage, commit, rebase onto the remote, push |
+| `commit_push` | Commit selected work, safely merge if needed, and push; retry existing commits |
 
 The spreadsheet tools exist for the same reason as `patch_file`: a 400 KB workbook is
 not something to move through a model to change three cells. Note that saving a
 workbook rewrites it — values, formulas and ordinary formatting survive, but charts,
 images and pivot tables may not. `xlsx_sheets` says what is at risk before you write.
+
+## Inspecting and synchronizing a clone
+
+Ordinary reads and edits do not silently fetch or pull an existing clone. `repo_status`
+includes the HEAD id, cached remote id, ahead/behind counts and uncommitted paths.
+To refresh the remote information without integrating anything:
+
+```
+repo_sync(repo="notes", mode="check")
+repo_log(repo="notes", side="local")
+repo_log(repo="notes", side="remote")
+repo_diff(repo="notes", scope="local-only", paths=["TODO.md"])
+repo_diff(repo="notes", scope="remote-only", paths=["TODO.md"])
+repo_show(repo="notes", commit="a1b2c3d")
+```
+
+Diff scopes are `worktree` (unstaged tracked files), `index` (staged), `head` (all
+local edits), `remote` (HEAD to cached origin), and `local-only` / `remote-only`
+(each side against their common ancestor). Untracked paths appear in status; use
+`read_file` to inspect their contents. Diff and show accept one-based `offset` and
+`limit` (at most 400 lines); output is also capped at 20,000 characters. Truncation
+is explicit. Narrow the paths or line window if a long line hits the cap.
+
+`repo_sync(mode="ff-only")` integrates a clean clone only when it can fast-forward.
+`repo_sync(mode="merge")` may join diverged histories, keeping both sets of commit
+ids. Every integration creates a `phush-backup/...` branch at the previous HEAD.
+Unrelated histories and other Git operations block synchronization. Dirty work is
+left untouched: first review it and commit selected paths. No stash, reset or
+automatic choice of one side is performed.
+
+A merge conflict is left in place for inspection, with the affected paths reported.
+Read the conflict, use `patch_file` to resolve it, and finish with
+`commit_push(repo="notes", message="Resolve both changes", paths=["TODO.md"])`.
+Remaining conflict markers or unresolved paths block completion. Other staged work
+blocks a named-path commit outside a merge, so it cannot silently join that commit.
+`commit_push(..., paths=[])` retries previously created commits without staging or
+committing new work. A rejected push leaves the commits and edits on the server.
 
 ## What it will not do
 
@@ -61,8 +101,8 @@ impossible rather than merely discouraged:
 - repository hooks are disabled on every call, so a clone cannot run code;
 - paths are checked before use: no absolute paths, no `..`, nothing inside `.git`, and
   the resolved path must still be inside the clone;
-- a push is always a fast-forward of the current branch; if the remote moved on and the
-  rebase conflicts, nothing is pushed and the local commit is left intact;
+- a push is always a fast-forward of the current branch; integration uses merge,
+  preserving existing commit ids; on conflict nothing is pushed;
 - every call is logged and rate limited.
 
 The worst outcome of a stolen token is an unwanted commit, which one `git revert`

@@ -1,6 +1,8 @@
 """The git guard: what the service is allowed to run, and what it refuses."""
 
 import unittest
+import subprocess
+from unittest import mock
 
 from phush import gitcmd
 from phush.gitcmd import GitError
@@ -56,6 +58,23 @@ class CheckArgsCases(unittest.TestCase):
         # Refusing is fine; silently running --force as a commit message is not.
         with self.assertRaises(GitError):
             gitcmd.check_args(["commit", "-m", "--force"])
+
+    def test_new_recovery_commands_have_no_delete_or_reset_forms(self):
+        gitcmd.check_args(["branch", "phush-backup/abc123", "HEAD"])
+        gitcmd.check_args(["merge", "--ff-only", "refs/remotes/origin/main"])
+        gitcmd.check_args(["merge", "--no-edit", "refs/remotes/origin/main"])
+        for args in (["branch", "-d", "main"], ["branch", "-f", "main", "HEAD"],
+                     ["merge", "--abort"], ["merge", "-s", "ours", "main"],
+                     ["merge", "--no-edit", "--exec=bad"],
+                     ["branch", "phush-backup/../main", "HEAD"]):
+            with self.subTest(args=args), self.assertRaises(GitError):
+                gitcmd.check_args(args)
+
+    def test_timeout_is_reported_as_a_git_error(self):
+        with mock.patch.object(gitcmd.subprocess, "run",
+                               side_effect=subprocess.TimeoutExpired("git", 1)):
+            with self.assertRaisesRegex(GitError, "timed out"):
+                gitcmd.run(None, ["status"])
 
 
 if __name__ == "__main__":

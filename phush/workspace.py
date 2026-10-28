@@ -15,6 +15,7 @@ import logging
 import re
 from dataclasses import dataclass
 from pathlib import Path
+from uuid import uuid4
 
 from . import gitcmd
 from .config import Config
@@ -61,6 +62,8 @@ class RepoState:
     path: Path
     branch: str
     cloned_now: bool
+    ready: bool = True
+    sync_report: str = "not requested"
 
 
 class Workspace:
@@ -103,7 +106,7 @@ class Workspace:
         branch = result.stdout.strip()
         return branch or self.config.default_branch
 
-    def open(self, repo: str) -> RepoState:
+    def open(self, repo: str, update: bool = True) -> RepoState:
         """Make sure the clone exists and is up to date with the remote."""
         name = self.check_name(repo)
         path = self.repo_path(name)
@@ -124,21 +127,139 @@ class Workspace:
             cloned_now = True
 
         branch = self.current_branch(path)
-        if not cloned_now:
-            self.sync(path, branch)
-        return RepoState(name=name, path=path, branch=branch, cloned_now=cloned_now)
+        report = "cloned from remote" if cloned_now else "not requested"
+        ready = True
+        if not cloned_now and update:
+            report = self.sync(path, branch)
+            ready = report.startswith("synced:")
+        return RepoState(name=name, path=path, branch=branch, cloned_now=cloned_now,
+                         ready=ready, sync_report=report)
 
     def sync(self, path: Path, branch: str) -> str:
-        """Fast-forward the clone to the remote. Never discards local work."""
+        """Opening may fast-forward, but never integrates divergent histories."""
+        return self.repo_sync(path.name, "ff-only")
+
+    def _path(self, repo: str) -> Path:
+        path = self.repo_path(repo)
+        if not (path / ".git").is_dir():
+            raise WorkspaceError(f"repository is not open on this server: {repo}")
+        return path
+
+    def _refs(self, path: Path) -> tuple[str, str]:
+        branch = self.current_branch(path)
+        if branch == "HEAD" or not self._git(path, ["check-ref-format", f"refs/heads/{branch}"]).ok:
+            raise WorkspaceError("a named branch is required")
+        return branch, f"refs/remotes/origin/{branch}"
+
+    def _resolve(self, path: Path, ref: str) -> str:
+        if not (ref == "HEAD" or re.fullmatch(r"[0-9a-fA-F]{7,40}", ref)):
+            raise WorkspaceError("commit must be HEAD or a hexadecimal commit id")
+        return self._git(path, ["rev-parse", "--verify", "--end-of-options",
+                                f"{ref}^{{commit}}"], check=True).stdout.strip()
+
+    def _merge_pending(self, path: Path) -> bool:
+        return self._git(path, ["rev-parse", "--verify", "MERGE_HEAD"]).ok
+
+    def _conflicts(self, path: Path) -> str:
+        return self._git(path, ["diff", "--name-only", "--diff-filter=U"],
+                         check=True).stdout.strip()
+
+    def _counts(self, path: Path, remote: str) -> tuple[int, int]:
+        out = self._git(path, ["rev-list", "--left-right", "--count",
+                               f"HEAD...{remote}"], check=True).stdout
+        return tuple(map(int, out.split()))
+
+    def _paths(self, path: Path, paths: list[str] | None) -> list[str]:
+        return [":(literal)" + str(safe_join(path, p).relative_to(path.resolve()))
+                for p in (paths or [])]
+
+    @staticmethod
+    def _page(text: str, offset: int = 1, limit: int = 200) -> str:
+        start = max(0, int(offset) - 1)
+        count = max(1, min(int(limit), 400))
+        lines = text.splitlines()
+        selected = lines[start:start + count]
+        body = "\n".join(selected)
+        if len(body) > 20000:
+            return body[:20000] + "\n(output truncated at 20000 characters; narrow paths or limit)"
+        end = start + len(selected)
+        suffix = f"; next offset {end + 1}" if end < len(lines) else "; end"
+        empty = "(no changes)" if not lines else "(no lines at this offset)"
+        return (body or empty) + f"\n(lines {start + 1}-{end}{suffix})"
+
+    def diff(self, repo: str, scope: str = "worktree", paths: list[str] | None = None,
+             offset: int = 1, limit: int = 200) -> str:
+        """Inspect cached refs and local changes without fetching or changing files."""
+        path = self._path(repo)
+        args = ["diff", "--no-ext-diff", "--no-textconv"]
+        if scope == "index":
+            args += ["--cached"]
+        elif scope == "head":
+            args += ["HEAD"]
+        elif scope in ("remote", "local-only", "remote-only"):
+            _, remote = self._refs(path)
+            if scope == "remote":
+                args += ["HEAD", remote]
+            else:
+                base = self._git(path, ["merge-base", "HEAD", remote], check=True).stdout.strip()
+                args += [base, "HEAD" if scope == "local-only" else remote]
+        elif scope != "worktree":
+            raise WorkspaceError("unknown diff scope")
+        args += ["--"] + self._paths(path, paths)
+        return self._page(self._git(path, args, check=True).stdout, offset, limit)
+
+    def show(self, repo: str, commit: str, paths: list[str] | None = None,
+             offset: int = 1, limit: int = 200) -> str:
+        path = self._path(repo)
+        oid = self._resolve(path, commit)
+        args = ["show", "--no-ext-diff", "--no-textconv", "--format=fuller",
+                "--stat", "--patch", oid, "--"] + self._paths(path, paths)
+        return self._page(self._git(path, args, check=True).stdout, offset, limit)
+
+    def repo_sync(self, repo: str, mode: str = "check") -> str:
+        """Fetch explicitly, then check, fast-forward, or merge with a recovery ref."""
+        if mode not in ("check", "ff-only", "merge"):
+            raise WorkspaceError("sync mode must be check, ff-only, or merge")
+        path = self._path(repo)
+        branch, remote = self._refs(path)
+        if self._merge_pending(path):
+            return "blocked: merge in progress; resolve and commit named paths\n" + self._conflicts(path)
+        if any((path / ".git" / part).exists() for part in
+               ("rebase-merge", "rebase-apply", "CHERRY_PICK_HEAD")):
+            return "blocked: another Git operation is in progress; left untouched"
+        available = self._git(path, ["ls-remote", "--exit-code", "--heads", "origin",
+                                     f"refs/heads/{branch}"])
+        if not available.ok:
+            return ("blocked: fetch failed (remote or branch unavailable); local work intact: "
+                    + available.text)
         fetch = self._git(path, ["fetch", "--quiet", "origin"])
         if not fetch.ok:
-            return f"could not reach the remote: {fetch.text}"
-        pull = self._git(path, ["pull", "--ff-only", "--quiet", "origin", branch])
-        if pull.ok:
-            return "up to date with the remote"
-        # A dirty tree or local commits stop a fast-forward. Neither is an error here:
-        # commit_push rebases local commits, and uncommitted edits are the caller's.
-        return f"not fast-forwarded (local changes present): {pull.text}"
+            return f"blocked: fetch failed (remote or branch unavailable); local work intact: {fetch.text}"
+        exists = self._git(path, ["rev-parse", "--verify", remote])
+        if not exists.ok:
+            return f"blocked: remote branch origin/{branch} is missing; no changes made"
+        ahead, behind = self._counts(path, remote)
+        state = f"ahead {ahead} / behind {behind}; " + self.status(repo)
+        if mode == "check":
+            return "fetched; " + state
+        if not self._git(path, ["merge-base", "HEAD", remote]).ok:
+            return "blocked: unrelated histories; preserve and inspect both sides\n" + state
+        if not behind:
+            return "synced: remote fetched; " + state
+        if self.is_dirty(path):
+            return "blocked: dirty tree preserved; commit selected paths before sync\n" + state
+        if ahead and mode == "ff-only":
+            return "blocked: histories diverged; inspect diff and use explicit merge\n" + state
+        backup = "phush-backup/" + uuid4().hex
+        self._git(path, ["branch", backup, "HEAD"], check=True)
+        args = (["merge", "--no-edit", "--no-ff", remote] if ahead
+                else ["merge", "--ff-only", remote])
+        merged = self._git(path, args)
+        if not merged.ok:
+            return (f"blocked: merge conflict or merge failure; backup {backup}; "
+                    "nothing pushed. Inspect repo_diff, patch the conflict files, then "
+                    "commit_push with explicit paths.\n" + self._conflicts(path) + "\n" + merged.text)
+        return f"synced: backup {backup}; " + self.status(repo)
 
     def is_dirty(self, path: Path) -> bool:
         return bool(self._git(path, ["status", "--porcelain"]).stdout.strip())
@@ -146,59 +267,63 @@ class Workspace:
     def commit_push(
         self, repo: str, message: str, paths: list[str] | None = None
     ) -> str:
-        """Stage, commit, rebase onto the remote, and push. Reports what happened."""
+        """Commit selected work, merge safely when needed, and retry pending pushes."""
         text = (message or "").strip()
         if not text:
             raise WorkspaceError("a commit message is required")
 
-        state = RepoState(
-            name=self.check_name(repo),
-            path=self.repo_path(repo),
-            branch="",
-            cloned_now=False,
-        )
-        path = state.path
-        if not (path / ".git").is_dir():
-            raise WorkspaceError(f"repository is not open on this server: {repo}")
-        branch = self.current_branch(path)
+        path = self._path(repo)
+        branch, remote = self._refs(path)
+        if any((path / ".git" / part).exists() for part in
+               ("rebase-merge", "rebase-apply", "CHERRY_PICK_HEAD")):
+            return "blocked: another Git operation is in progress; left untouched"
+        pending = self._merge_pending(path)
+        if pending and not paths:
+            return "blocked: merge in progress; provide explicit resolved paths\n" + self._conflicts(path)
 
-        if paths:
-            rel = [str(safe_join(path, p).relative_to(path.resolve())) for p in paths]
-            self._git(path, ["add", "--"] + rel, check=True)
+        if paths and not pending:
+            staged_before = set(self._git(path, ["diff", "--cached", "--name-only", "-z"],
+                                          check=True).stdout.split("\0")) - {""}
+            selected = set(self._git(path, ["diff", "--cached", "--name-only", "-z", "--"]
+                                     + self._paths(path, paths), check=True).stdout.split("\0"))
+            if staged_before - selected:
+                return "blocked: other paths were already staged; index left untouched"
+
+        if paths is not None:
+            if pending:
+                for name in paths:
+                    target = safe_join(path, name)
+                    if target.is_file() and any(line.startswith(("<<<<<<< ", "||||||| ", "=======", ">>>>>>> "))
+                                                for line in target.read_text(errors="replace").splitlines()):
+                        return f"blocked: conflict markers remain in {name}; nothing staged"
+            if paths:
+                self._git(path, ["add", "--"] + self._paths(path, paths), check=True)
         else:
             self._git(path, ["add", "--all"], check=True)
 
         staged = self._git(path, ["diff", "--cached", "--name-only"]).stdout.strip()
-        if not staged:
-            return "nothing to commit — the working tree matches the last commit"
+        if self._conflicts(path):
+            return "blocked: unresolved merge paths\n" + self._conflicts(path)
+        committed = bool((staged or pending) and paths != [])
+        if committed:
+            commit = self._git(path, ["commit", "--quiet", "-m", text])
+            if not commit.ok:
+                raise WorkspaceError(f"commit failed: {commit.text}")
 
-        commit = self._git(path, ["commit", "--quiet", "-m", text])
-        if not commit.ok:
-            raise WorkspaceError(f"commit failed: {commit.text}")
-
-        fetch = self._git(path, ["fetch", "--quiet", "origin"])
-        if not fetch.ok:
-            return (
-                f"committed locally, but the remote is unreachable, so nothing was "
-                f"pushed: {fetch.text}"
-            )
-
-        rebase = self._git(path, ["pull", "--rebase", "--quiet", "origin", branch])
-        if not rebase.ok:
-            self._git(path, ["rebase", "--abort"])
-            return (
-                "committed locally, but the remote has changes that conflict with it. "
-                "The rebase was aborted and your commit is intact on the server. "
-                f"Conflict: {rebase.text}"
-            )
+        report = self.repo_sync(repo, "merge")
+        if not report.startswith("synced:"):
+            return "local commits intact; " + report
+        ahead, _ = self._counts(path, remote)
+        if not ahead:
+            return "nothing to commit or push; " + self.status(repo)
 
         push = self._git(path, ["push", "--quiet", "origin", branch])
         if not push.ok:
             return f"committed locally, but the push failed: {push.text}"
 
         head = self._git(path, ["log", "-1", "--format=%h %s"]).stdout.strip()
-        files = "\n".join(f"  {name}" for name in staged.splitlines())
-        return f"pushed to {branch}: {head}\n{files}"
+        files = "\n".join(f"  {name}" for name in staged.splitlines()) if committed else ""
+        return f"pushed to {branch}: {head}\n{files}\n" + self.status(repo)
 
     def status(self, repo: str) -> str:
         path = self.repo_path(repo)
@@ -206,16 +331,34 @@ class Workspace:
             return f"repository is not open on this server: {repo}"
         branch = self.current_branch(path)
         dirty = self._git(path, ["status", "--short", "--branch"]).text
-        return f"branch {branch}\n{dirty}"
+        head = self._git(path, ["rev-parse", "HEAD"], check=True).stdout.strip()
+        if branch == "HEAD":
+            return f"detached HEAD {head}; sync requires a named branch\n{dirty}"
+        _, remote = self._refs(path)
+        origin = self._git(path, ["rev-parse", "--verify", remote])
+        refs = f"HEAD {head}\norigin/{branch} {origin.stdout.strip()} (cached; repo_sync refreshes)"
+        if origin.ok:
+            ahead, behind = self._counts(path, remote)
+            refs += f"\nahead {ahead} / behind {behind}"
+        else:
+            refs += "\nremote branch unavailable"
+        conflicts = self._conflicts(path)
+        if conflicts:
+            refs += "\nunresolved paths:\n" + conflicts
+        return f"branch {branch}\n{refs}\n{dirty}"
 
-    def log(self, repo: str, count: int = 10) -> str:
+    def log(self, repo: str, count: int = 10, side: str = "head") -> str:
         path = self.repo_path(repo)
         if not (path / ".git").is_dir():
             return f"repository is not open on this server: {repo}"
         limit = max(1, min(int(count), 50))
-        return self._git(
-            path, ["log", f"-{limit}", "--format=%h %ad %s", "--date=short"]
-        ).text
+        args = ["log", f"-{limit}", "--format=%h %ad %s", "--date=short"]
+        if side in ("local", "remote"):
+            _, remote = self._refs(path)
+            args += [f"{remote}..HEAD" if side == "local" else f"HEAD..{remote}"]
+        elif side != "head":
+            raise WorkspaceError("log side must be head, local, or remote")
+        return self._git(path, args, check=True).text or "(no commits on this side)"
 
     def tracked_files(self, repo: str, subdir: str = "") -> list[str]:
         path = self.repo_path(repo)

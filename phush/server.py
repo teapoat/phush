@@ -86,11 +86,11 @@ def build_server(config: Config) -> MCPServer:
     limiter = RateLimit(config.rate_max_requests, config.rate_window_seconds)
     mcp = MCPServer("phush", version="0.1.0")
 
-    def _open(repo: str, tool: str, detail: str = ""):
+    def _open(repo: str, tool: str, detail: str = "", update: bool = False):
         """Shared entry for every tool: rate limit, log, make sure the clone is ready."""
         limiter.check()
         log.info("%s repo=%s %s", tool, repo, detail)
-        return workspace.open(repo)
+        return workspace.open(repo, update=update)
 
     @mcp.tool(
         description=(
@@ -101,11 +101,14 @@ def build_server(config: Config) -> MCPServer:
     )
     async def repo_open(repo: str) -> str:
         try:
-            state = _open(repo, "repo_open")
+            state = _open(repo, "repo_open", update=True)
+            status = workspace.status(repo)
         except (WorkspaceError, GitError) as exc:
             return f"refused: {exc}"
         what = "cloned for the first time" if state.cloned_now else "already on the server"
-        return f"{state.name} ready on branch {state.branch} ({what})"
+        outcome = "ready" if state.ready else "not synchronized"
+        return (f"{state.name} {outcome} on branch {state.branch} ({what})\n"
+                f"{state.sync_report}\n{status}")
 
     @mcp.tool(
         description=(
@@ -129,11 +132,55 @@ def build_server(config: Config) -> MCPServer:
         except (WorkspaceError, GitError) as exc:
             return f"refused: {exc}"
 
-    @mcp.tool(description="Show the most recent commits of a repository.")
-    async def repo_log(repo: str, count: int = 10) -> str:
+    @mcp.tool(description=("Show recent commits without fetching. side=head shows HEAD; "
+                           "local shows commits only on HEAD, remote only on cached origin."))
+    async def repo_log(repo: str, count: int = 10, side: str = "head") -> str:
         try:
             limiter.check()
-            return workspace.log(repo, count)
+            log.info("repo_log repo=%s side=%s", repo, side)
+            return workspace.log(repo, count, side)
+        except (WorkspaceError, GitError) as exc:
+            return f"refused: {exc}"
+
+    @mcp.tool(description=(
+        "Read-only diff without fetching. Scopes: worktree, index, head (all local "
+        "edits), remote (HEAD to cached origin), local-only or remote-only (from "
+        "their common base). Optional literal paths; output is paginated and capped."
+    ))
+    async def repo_diff(repo: str, scope: str = "worktree", paths: list[str] | None = None,
+                        offset: int = 1, limit: int = 200) -> str:
+        try:
+            limiter.check()
+            log.info("repo_diff repo=%s scope=%s", repo, scope)
+            return workspace.diff(repo, scope, paths, offset, limit)
+        except (WorkspaceError, GitError) as exc:
+            return f"refused: {exc}"
+
+    @mcp.tool(description=(
+        "Show a commit's metadata and patch without fetching. Commit must be HEAD "
+        "or a hexadecimal id from repo_log. Optional literal paths, offset and limit."
+    ))
+    async def repo_show(repo: str, commit: str = "HEAD", paths: list[str] | None = None,
+                        offset: int = 1, limit: int = 200) -> str:
+        try:
+            limiter.check()
+            log.info("repo_show repo=%s commit=%s", repo, commit)
+            return workspace.show(repo, commit, paths, offset, limit)
+        except (WorkspaceError, GitError) as exc:
+            return f"refused: {exc}"
+
+    @mcp.tool(description=(
+        "Explicit safe synchronization. mode=check only fetches and diagnoses; "
+        "ff-only advances a clean clone; merge also joins divergent histories, "
+        "creating a recovery branch first. Dirty work is preserved and blocks "
+        "integration. A conflict is left inspectable: patch files and finish with "
+        "commit_push(paths=[resolved files]). Never forces, resets or rebases."
+    ))
+    async def repo_sync(repo: str, mode: str = "check") -> str:
+        try:
+            limiter.check()
+            log.info("repo_sync repo=%s mode=%s", repo, mode)
+            return workspace.repo_sync(repo, mode)
         except (WorkspaceError, GitError) as exc:
             return f"refused: {exc}"
 
@@ -349,9 +396,10 @@ def build_server(config: Config) -> MCPServer:
         description=(
             "Commit the pending changes and push them to the remote. Give a clear "
             "commit message. Pass paths to commit only those files, or leave it out to "
-            "commit everything that changed. If the remote moved on, the commit is "
-            "rebased on top of it; on conflict nothing is pushed and the commit stays "
-            "on the server."
+            "commit everything that changed. If the remote moved on, the histories "
+            "are merged with a recovery branch first. On conflict nothing is pushed: "
+            "patch the conflict files and call again with their explicit paths. "
+            "Empty paths retries a push without creating a commit."
         )
     )
     async def commit_push(
